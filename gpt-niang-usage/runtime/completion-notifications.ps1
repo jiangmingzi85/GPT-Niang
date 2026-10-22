@@ -45,10 +45,11 @@ function Stop-TemporaryCompletion {
   }catch{}
   $script:lastPosition=$null;$script:attachedHost=[IntPtr]::Zero
 }
-function Start-TemporaryCompletion {
+function Start-TemporaryCompletion([ValidateSet('completion','quota-alert')][string]$Kind='completion') {
   if($script:completionTemporary){return $true}
   $foreground=[CompletionWindowLayer]::GetForegroundWindow()
   $script:completionTemporary=@{owner=[CompletionWindowLayer]::GetWindowLongPtr($script:widgetHandle,-8);style=[CompletionWindowLayer]::GetWindowLongPtr($script:widgetHandle,-20);topmost=$script:window.Topmost;visible=$script:window.IsVisible;previous=[CompletionWindowLayer]::GetWindow($script:widgetHandle,3);foreground=$foreground;fullscreen=(Test-CompletionFullscreen $foreground);expiresAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()+7000;timer=$null}
+  $script:completionTemporary.kind=$Kind
   try{
     if($script:occlusionRecovery){$script:occlusionRecovery.Configure([IntPtr]::Zero,$false)}
     if($script:hostFollower){$script:hostFollower.Detach()}
@@ -66,7 +67,10 @@ function Start-TemporaryCompletion {
         $active=Test-WidgetCompletionHostForeground
         $foreground=[CompletionWindowLayer]::GetForegroundWindow()
         $leftFullscreen=$script:completionTemporary.fullscreen -and ($foreground-ne $script:completionTemporary.foreground -or !(Test-CompletionFullscreen $foreground))
-        if($active -or $leftFullscreen){Dismiss-CompletionNotification;if(!$script:collapsed){Hide-Quota -KeepCompletion}}
+        if($active -or $leftFullscreen){
+          if($script:completionTemporary.kind-eq 'quota-alert'){if(!$script:collapsed){Hide-Quota}else{Stop-TemporaryCompletion}}
+          else{Dismiss-CompletionNotification;if(!$script:collapsed){Hide-Quota -KeepCompletion}}
+        }
         # An error while opening the scene must never leave a topmost
         # click-through reminder layer pinned on screen. This independent
         # deadline works even when sceneDeadline was never set.
@@ -202,7 +206,7 @@ function Pause-CompletionNotification {
 function Tick-CompletionNotifications([bool]$Visible) {
   if(!$script:completionNotificationsEnabled){return}
   Read-CompletionMonitorOutput;Start-CompletionMonitor
-  $busy=[bool]$script:drag -or $script:context.IsOpen -or $script:settingsSizePreview -or (Test-WidgetUpdateEditor)
+  $busy=[bool]$script:drag -or $script:context.IsOpen -or $script:settingsSizePreview -or (Test-WidgetUpdateEditor) -or ($script:expressionSettingsWindow -and $script:expressionSettingsWindow.IsVisible)
   if($busy){Pause-CompletionNotification;return}
   if($script:completionTemporary){return}
   $foreground=Test-WidgetCompletionHostForeground

@@ -119,6 +119,8 @@ function Initialize-WidgetSettingsMenu {
   Add-SettingsDivider
   $script:settingsMenuUi.Character=Add-SettingsAction '更换形象' {Open-WidgetCharacterGallery} -ReturnItem
   $script:settingsMenuUi.Character.ToolTip='选择形象或添加电脑上的图片'
+  if(Get-Command Open-WidgetExpressionSettings -ErrorAction SilentlyContinue){Add-SettingsAction '表情与互动设置' {Open-WidgetExpressionSettings}}
+  if(Get-Command Add-WidgetQuotaSettingsMenu -ErrorAction SilentlyContinue){Add-WidgetQuotaSettingsMenu}
   $script:settingsMenuUi.Appearance=Add-SettingsSubmenu '外观设置' {
   $presets=New-Object Windows.Controls.Primitives.UniformGrid;$presets.Columns=3;$presets.Margin=[Windows.Thickness]::new(0,1,0,2);$script:settingsMenuUi.SizeButtons=@()
   foreach($choice in @(@{label='小 · 80%';scale=0.8},@{label='标准 · 100%';scale=1.0},@{label='大 · 140%';scale=1.4})){
@@ -266,6 +268,7 @@ function Update-WidgetSizePresets{
 function Update-WidgetSettingsMenu{
   $script:settingsMenuSync=$true
   try{
+    if(Get-Command Update-WidgetQuotaSettingsMenu -ErrorAction SilentlyContinue){Update-WidgetQuotaSettingsMenu}
     Update-WidgetUpdateMenu
     $script:settingsMenuUi.MusicEnabled.IsChecked=Test-WidgetMusicActive
     $script:settingsMenuUi.Completion.IsChecked=$script:completionNotificationsEnabled

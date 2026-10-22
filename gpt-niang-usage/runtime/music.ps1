@@ -35,6 +35,7 @@ function Stop-WidgetMusic([switch]$KeepPosition) {
 function Set-WidgetMusicEnabled([bool]$Enabled) {
   if(!$Enabled){Stop-WidgetMusic;return}
   if(Test-WidgetMusicActive){return}
+  if(Get-Command Stop-WidgetPetAction -ErrorAction SilentlyContinue){Stop-WidgetPetAction}
   if(!$script:window.IsVisible){throw '请先显示挂件再开启音乐律动。'}
   try{
     Hide-Quota

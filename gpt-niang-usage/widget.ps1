@@ -11,6 +11,9 @@ $null=New-Item -ItemType Directory -Path $script:dataDir -Force
 . ([ScriptBlock]::Create([IO.File]::ReadAllText((Join-Path $script:appDir 'runtime\ui-settings.ps1'),[Text.Encoding]::UTF8)))
 . ([ScriptBlock]::Create([IO.File]::ReadAllText((Join-Path $script:appDir 'runtime\characters.ps1'),[Text.Encoding]::UTF8)))
 . ([ScriptBlock]::Create([IO.File]::ReadAllText((Join-Path $script:appDir 'runtime\character-gallery.ps1'),[Text.Encoding]::UTF8)))
+. ([ScriptBlock]::Create([IO.File]::ReadAllText((Join-Path $script:appDir 'runtime\quota-notifications.ps1'),[Text.Encoding]::UTF8)))
+. ([ScriptBlock]::Create([IO.File]::ReadAllText((Join-Path $script:appDir 'runtime\expressions.ps1'),[Text.Encoding]::UTF8)))
+. ([ScriptBlock]::Create([IO.File]::ReadAllText((Join-Path $script:appDir 'runtime\expression-settings.ps1'),[Text.Encoding]::UTF8)))
 . (Join-Path $script:appDir 'runtime\audio.ps1')
 . (Join-Path $script:appDir 'runtime\host-layer.ps1')
 . (Join-Path $script:appDir 'runtime\host-follow.ps1')
@@ -164,6 +167,7 @@ function Write-WidgetJson($file,$value){
 }
 function Save-Settings {Write-WidgetJson $settingsFile @{layoutVersion=2;right=$script:offsetRight;left=$script:offsetLeft;bottom=$script:offsetBottom;anchor=$script:anchor;side=$script:side;scale=$script:scale;bubbleScale=$script:bubbleScale;collapsed=$script:collapsed;soundOn=$script:soundOn;soundVolume=$script:soundVolume;bubbleTapAdvance=$script:bubbleTapAdvance;hideMenu=$script:hideMenu;colorMode=$script:colorMode;colorChance=$script:colorChance;colorTextChance=$script:colorTextChance;colorPaused=$script:colorPaused;followHost=$script:followHost;desktopTopmost=$script:desktopTopmost;desktopLeft=$script:desktopLeft;desktopTop=$script:desktopTop;characterId=$script:characterId;autoQuoteEnabled=$script:autoQuoteEnabled;autoQuoteIntervalSeconds=$script:autoQuoteIntervalSeconds;taskCompletionBubble=$script:completionNotificationsEnabled}}
 function Set-WidgetCharacter([string]$Id,[switch]$NoSave) {
+  if(Get-Command Reset-WidgetExpression -ErrorAction SilentlyContinue){Reset-WidgetExpression}
   if($script:widgetMusic -and $script:widgetMusic.Enabled){Stop-WidgetMusic}
   $character=Get-WidgetCharacter $script:appDir $script:dataDir $Id
   # Decode and build the click-through map before replacing the current pose.
@@ -192,6 +196,8 @@ function Set-WidgetCharacter([string]$Id,[switch]$NoSave) {
 }
 try{$null=Set-WidgetCharacter $script:characterId -NoSave}
 catch{$script:characterLoadNotice='上次使用的图片无法读取，已恢复龙娘1。';$null=Set-WidgetCharacter 'gpt-dragon' -NoSave}
+Initialize-WidgetQuotaNotifications
+Initialize-WidgetExpressions
 function Get-WidgetPlacementFrame {
   if($script:followHost){return [GptWidgetNative]::Frame($script:hostHandle)}
   $point=if($null-ne $script:desktopLeft -and $null-ne $script:desktopTop){[Drawing.Point]::new([int]$script:desktopLeft,[int]$script:desktopTop)}else{[Drawing.Point]::new(0,0)}
@@ -441,7 +447,7 @@ function Apply-Scene {
   Update-BubbleTooltip
 }
 function Update-BubbleTooltip {
-  $copy=if($script:bubbleMode-in @('quote','completion')){$script:ui.QuoteText.Tag}else{
+  $copy=if($script:bubbleMode-in @('quote','completion','quota-alert')){$script:ui.QuoteText.Tag}else{
     $parts=@()
     if($script:status.planLabel){$parts+='当前套餐：'+$script:status.planLabel}
     foreach($row in (Get-QuotaRows)){
@@ -479,6 +485,7 @@ function Update-BubbleTooltip {
 
 function Switch-Scene([string]$mode){
   if($script:collapsed){return}
+  if($script:bubbleMode-eq 'quota-alert' -and $mode-ne 'quota-alert' -and $script:completionTemporary -and $script:completionTemporary.kind-eq 'quota-alert'){Stop-TemporaryCompletion}
   if($script:bubbleMode-eq 'completion' -and $mode-ne 'completion'){Dismiss-CompletionNotification}
   Reset-WidgetAutoQuoteSchedule
   $script:sceneRevision++;$script:bubbleMode=$mode
@@ -505,6 +512,7 @@ function Next-Bubble {
   if($script:bubbleMode-eq 'quota'){Switch-Scene 'quote'}else{Hide-Quota}
 }
 function Click-Character {
+  if(Get-Command Show-WidgetPetFeedback -ErrorAction SilentlyContinue){Show-WidgetPetFeedback 'happy' 800}
   if($script:collapsed){Show-Quota}
   elseif($script:bubbleTapAdvance){Next-Bubble}
   elseif($script:bubbleMode-ne 'quota'){Switch-Scene 'quota'}
@@ -520,7 +528,7 @@ function Test-WidgetCompletionHostForeground {
   return $foreground-eq $script:hostHandle
 }
 function Tick-WidgetAutoQuote([long]$Now,[bool]$Visible) {
-  $busy=($script:completionNotificationsEnabled -and $script:completionPending) -or !$script:collapsed -or [bool]$script:drag -or $script:context.IsOpen -or $script:settingsSizePreview -or ($script:closeTimer -and $script:closeTimer.IsEnabled) -or (Test-WidgetUpdateEditor)
+  $busy=($script:completionNotificationsEnabled -and $script:completionPending) -or !$script:collapsed -or [bool]$script:drag -or $script:context.IsOpen -or $script:settingsSizePreview -or ($script:closeTimer -and $script:closeTimer.IsEnabled) -or (Test-WidgetUpdateEditor) -or ($script:expressionSettingsWindow -and $script:expressionSettingsWindow.IsVisible)
   if(Test-WidgetAutoQuoteDue $Now $Visible ([bool]$busy)){Show-Quote;$script:autoQuoteDisplayCount++}
 }
 function Show-Quota {
@@ -529,13 +537,14 @@ function Show-Quota {
   if($wasCollapsed){Request-Refresh}
 }
 function Show-Quote {Open-WidgetBubble 'quote'}
-function Open-WidgetBubble([ValidateSet('quota','quote','completion')][string]$Mode) {
+function Open-WidgetBubble([ValidateSet('quota','quote','completion','quota-alert')][string]$Mode) {
   Reset-WidgetAutoQuoteSchedule
   if(!$script:collapsed){if($Mode-eq 'quote' -or $script:bubbleMode-ne $Mode){Switch-Scene $Mode}else{Restart-SceneTtl};return}
   $script:bubbleEpoch++;$script:collapsed=$false;$script:sceneRevision++
   $script:bubbleMode=$Mode
   if($Mode-eq 'quote'){$script:ui.QuoteText.Text=Get-WidgetBubbleQuote $script:dataDir;Fit-QuoteText}
   if($Mode-eq 'completion'){$script:ui.QuoteText.Text="Codex`n有回复已结束";Fit-QuoteText}
+  if($Mode-eq 'quota-alert'){$script:ui.QuoteText.Text=$script:quotaAlertMessage;Fit-QuoteText}
   Apply-Scene
   if($script:sceneTimer){$script:sceneTimer.Stop()}
   if($script:closeTimer){$script:closeTimer.Stop();$script:closeTimer=$null}
@@ -555,6 +564,7 @@ function Open-WidgetBubble([ValidateSet('quota','quote','completion')][string]$M
 }
 function Hide-Quota([switch]$KeepCompletion) {
   if($script:collapsed){return}
+  if($script:bubbleMode-eq 'quota-alert' -and $script:completionTemporary -and $script:completionTemporary.kind-eq 'quota-alert'){Stop-TemporaryCompletion}
   if($script:bubbleMode-eq 'completion' -and !$KeepCompletion){Dismiss-CompletionNotification}
   Reset-WidgetAutoQuoteSchedule
   $script:collapsed=$true;$script:bubbleEpoch++
@@ -907,6 +917,7 @@ function Ensure-QuotaWorker([long]$now){
   catch{[IO.File]::WriteAllText((Join-Path $script:dataDir 'worker-error.txt'),$_.Exception.Message,[Text.UTF8Encoding]::new($false))}
 }
 function Stop-WidgetRuntime {
+  if(Get-Command Stop-WidgetPetAction -ErrorAction SilentlyContinue){Stop-WidgetPetAction}
   if($script:runtimeClosed){return};$script:runtimeClosed=$true
   try{if($script:occlusionRecovery){$script:occlusionRecovery.Dispose()}}catch{}
   try{Stop-WidgetMusic}catch{}
@@ -939,7 +950,7 @@ function Tick-Widget {
   Ensure-QuotaWorker $now
   if($script:completionTemporary){
     if($script:occlusionRecovery){$script:occlusionRecovery.Configure([IntPtr]::Zero,$false)}
-    if($now-$script:lastPresence-ge 1000){Write-WidgetPresence $true $now;$script:lastPresence=$now;Update-Quota;Read-DisplayRequest;Tick-CompletionNotifications $true}
+    if($now-$script:lastPresence-ge 1000){Write-WidgetPresence $true $now;$script:lastPresence=$now;Update-Quota;Update-WidgetExpression $now;Read-DisplayRequest;Tick-WidgetQuotaNotifications $true $now;Tick-CompletionNotifications $true}
     return
   }
   $foreground=[GptWidgetNative]::GetAncestor([GptWidgetNative]::GetForegroundWindow(),2)
@@ -1009,13 +1020,15 @@ function Tick-Widget {
     [GptWidgetNative]::SetWindowPos($script:widgetHandle,[IntPtr](-2),0,0,0,0,0x13)|Out-Null
     $script:window.Hide()
   }
-  $recoverAllowed=$script:followHost -and $visible -and !$script:drag -and !$script:context.IsOpen -and !$script:settingsSizePreview -and !($script:characterGallery -and $script:characterGallery.IsVisible) -and !($script:quoteEditor -and $script:quoteEditor.IsVisible)
+  $recoverAllowed=$script:followHost -and $visible -and !$script:drag -and !$script:context.IsOpen -and !$script:settingsSizePreview -and !($script:characterGallery -and $script:characterGallery.IsVisible) -and !($script:quoteEditor -and $script:quoteEditor.IsVisible) -and !($script:expressionSettingsWindow -and $script:expressionSettingsWindow.IsVisible)
   if($script:occlusionRecovery){$script:occlusionRecovery.Configure($script:hostHandle,[bool]$recoverAllowed)}
   if($now-$script:lastPresence-ge 1000){
-    Update-WidgetMusicVisibility ([bool]$visible) ([bool]($script:completionTemporary -or $script:settingsSizePreview -or ($script:characterGallery -and $script:characterGallery.IsVisible) -or ($script:quoteEditor -and $script:quoteEditor.IsVisible)))
+    Update-WidgetMusicVisibility ([bool]$visible) ([bool]($script:completionTemporary -or $script:settingsSizePreview -or ($script:characterGallery -and $script:characterGallery.IsVisible) -or ($script:quoteEditor -and $script:quoteEditor.IsVisible) -or ($script:expressionSettingsWindow -and $script:expressionSettingsWindow.IsVisible)))
     Write-WidgetPresence ([bool]$visible) $now
     Update-Quota;$script:lastPresence=$now
+    Update-WidgetExpression $now
     Read-DisplayRequest
+    Tick-WidgetQuotaNotifications ([bool]$visible) $now
     Tick-CompletionNotifications ([bool]$visible)
     Tick-WidgetAutoQuote $now ([bool]$visible)
   }

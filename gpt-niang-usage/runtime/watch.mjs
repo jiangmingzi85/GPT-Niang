@@ -7,6 +7,7 @@ import {readPendingRequests,completeRequests,cleanRefreshResults,widgetUpdating,
 
 import {createPipeRefreshHandler} from './worker-ipc.mjs';
 import {pluginVersion} from './metadata.mjs';
+import {reduceQuotaAlerts,shouldPollQuota} from './quota-alerts.mjs';
 
 const config=readJson(process.argv[2]);
 if(!config?.dataDir || !config?.codexPath)throw new Error('Invalid widget installation configuration');
@@ -26,6 +27,19 @@ let status=null,requestToken=readRefreshRequest(path.join(config.dataDir,'refres
 const activeRequestIds=new Set();
 const initialStop=readRefreshRequest(path.join(config.dataDir,'stop.flag'));
 const save=data=>{atomicJson(statusFile,data);status=data;};
+const alertStateFile=path.join(config.dataDir,'quota-alert-state.json');
+let alertState=readJson(alertStateFile),lastAlertErrorAt=0;
+const alertSettings=()=>process.platform==='win32'?readJson(path.join(config.dataDir,'quota-alert-settings.json')):null;
+function updateQuotaAlerts(snapshot=null,now=Date.now()) {
+  if(process.platform!=='win32')return;
+  try{
+    const next=reduceQuotaAlerts(alertState,snapshot,alertSettings(),{now,ackIds:readJson(path.join(config.dataDir,'quota-alert-ack.json'))?.ids});
+    if(JSON.stringify(next)!==JSON.stringify(alertState)){atomicJson(alertStateFile,next);alertState=next;}
+  }catch{
+    // Alert persistence must not interrupt normal quota replies or expose account details.
+    if(now-lastAlertErrorAt>=60000){lastAlertErrorAt=now;console.error('Quota alert state could not be saved; a later heartbeat will retry.');}
+  }
+}
 const health=()=>atomicJson(healthFile,{...lock.owner,version:pluginVersion,...(handoffSupported?{handoffProtocol:1}:{}),at:Date.now(),busy:refresh.busy,lastRefresh:refresh.lastRefresh});
 function stopForOwner(request) {
   if(request===null)return false;
@@ -55,9 +69,11 @@ refresh=createRefreshQueue(async()=>{
   for(const request of batch)activeRequestIds.add(request.id);
   try {
     const next=await readUsage(resolveCodexExecutable(config.codexPath),{onAccount:accountKey=>{
+      if(alertState?.accountKey!==accountKey || !accountKey)updateQuotaAlerts({accountKey,ok:false,queryOk:false});
       if(status?.accountKey!==accountKey || !accountKey)save({ok:false,queryOk:false,accountKey,error:'正在读取当前账户额度…',windows:[],checkedAt:Date.now()});
     }});
     save(mergeUsageSnapshot(status,next));
+    updateQuotaAlerts(next);
     ipc.complete(pipeBatch,status);
     completeRequests(config.dataDir,batch,status);
     lastActivity=Date.now();
@@ -87,17 +103,18 @@ heartbeat=setInterval(()=>{
     try{health();}catch{}
     return; // Finish the current query; leave new file requests for the next owner.
   }
-  // No background queries while Codex is not visible; a fresh query on return.
+  // Hidden queries require a live Windows GUI and an explicit reminder opt-in.
   const now=Date.now(),presence=readJson(path.join(config.dataDir,'presence.json'));
-  const active=presence?.visible && now-presence.at>=0 && now-presence.at<5000 && processAlive(presence.pid);
-  if(active)lastActivity=now;
+  const polling=shouldPollQuota({presence,now,settings:alertSettings(),isAlive:processAlive});
+  updateQuotaAlerts(null,now);
+  if(polling)lastActivity=now;
   const request=readRefreshRequest(path.join(config.dataDir,'refresh.flag'));
   const requested=request!==null && request!==requestToken;
   if(requested)requestToken=request;
   const pending=readPendingRequests(config.dataDir,now);
   if(requested)void refresh.request();
-  else if(pending.some(request=>!activeRequestIds.has(request.id)) || (active && !refresh.busy && now-refresh.lastRefresh>=60000))void refresh.request();
-  if(!parentPid && !active && !refresh.busy && pending.length===0 && ipc.pendingCount===0 && now-lastActivity>=30000)process.exit(0);
+  else if(pending.some(request=>!activeRequestIds.has(request.id)) || (polling && !refresh.busy && now-refresh.lastRefresh>=60000))void refresh.request();
+  if(!parentPid && !polling && !refresh.busy && pending.length===0 && ipc.pendingCount===0 && now-lastActivity>=30000)process.exit(0);
   cleanRefreshResults(config.dataDir,now);
   try{health();}catch{}
 },1000);
